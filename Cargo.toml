@@ -8,5 +8,11 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = "0.31"
 egui = "0.31"
+bitvec = "1"
+parity-scale-codec = { version = "3.6", features = ["derive"] }
+rocksdb = { version = "0.22", default-features = false }
+starknet-crypto = "0.7"
+starknet-types-core = { version = "0.2.1", features = ["hash", "parity-scale-codec"] }
+thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }

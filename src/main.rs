@@ -2,11 +2,16 @@ use clap::Parser;
 use tracing::Level;
 
 mod app;
+mod bonsai;
+mod db;
+mod model;
+mod ui;
+mod util;
 
 #[derive(Debug, Parser)]
 #[command(name = "bonsai-trie-visualizer")]
 #[command(about = "Visualize Madara Bonsai tries", long_about = None)]
-struct Args {
+pub struct Args {
     /// Path to Madara RocksDB directory
     #[arg(long, value_name = "PATH")]
     db_path: Option<String>,

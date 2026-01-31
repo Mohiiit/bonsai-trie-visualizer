@@ -1,11 +1,34 @@
 use eframe::egui;
-
+use egui::CollapsingHeader;
+use crate::bonsai::diff_reader::read_block_log;
+use crate::bonsai::node::Node;
+use crate::bonsai::path::{felt_to_path, PathBits};
+use crate::bonsai::proof::{build_proof, verify_proof, ProofNode};
+use crate::bonsai::trie_reader::{TrieReader, TrieSpec};
+use crate::db::cf_map;
+use crate::db::RocksDb;
+use crate::model::TrieKind;
+use crate::util::hex::{bytes_to_hex, format_felt_short, parse_felt_hex};
 use crate::Args;
 
 pub struct BonsaiApp {
     args: Args,
     status: String,
     active_tab: Tab,
+
+    db_path_input: String,
+    db: Option<RocksDb>,
+    db_error: Option<String>,
+
+    tree_trie: TrieKind,
+    storage_identifier_input: String,
+
+    key_input: String,
+    path_trace_status: String,
+    proof_status: String,
+
+    diff_block_input: String,
+    diff_trie: TrieKind,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -19,15 +42,437 @@ enum Tab {
 
 impl BonsaiApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, args: Args) -> Self {
-        let status = match &args.db_path {
-            Some(path) => format!("DB path: {path}"),
-            None => "DB path not set".to_string(),
+        let db_path_input = args.db_path.clone().unwrap_or_default();
+        let status = if db_path_input.is_empty() {
+            "DB path not set".to_string()
+        } else {
+            format!("DB path: {db_path_input}")
         };
         Self {
             args,
             status,
             active_tab: Tab::Tree,
+            db_path_input,
+            db: None,
+            db_error: None,
+            tree_trie: TrieKind::Contract,
+            storage_identifier_input: String::new(),
+            key_input: String::new(),
+            path_trace_status: String::new(),
+            proof_status: String::new(),
+            diff_block_input: String::new(),
+            diff_trie: TrieKind::Contract,
         }
+    }
+
+    fn ensure_db(&mut self) {
+        if self.db.is_some() || self.db_path_input.trim().is_empty() {
+            return;
+        }
+        match RocksDb::open_read_only(self.db_path_input.trim()) {
+            Ok(db) => {
+                self.status = format!("DB open: {}", self.db_path_input.trim());
+                self.db = Some(db);
+                self.db_error = None;
+            }
+            Err(err) => {
+                self.db = None;
+                self.db_error = Some(err.to_string());
+                self.status = "DB open failed".to_string();
+            }
+        }
+    }
+
+    fn build_spec(&self, trie: TrieKind) -> Option<TrieSpec> {
+        let identifier = match trie {
+            TrieKind::Contract => trie.identifier().to_vec(),
+            TrieKind::Class => trie.identifier().to_vec(),
+            TrieKind::Storage => {
+                let felt = parse_felt_hex(&self.storage_identifier_input).ok()?;
+                felt.to_bytes_be().to_vec()
+            }
+        };
+
+        let (trie_cf, flat_cf, log_cf) = match trie {
+            TrieKind::Contract => (
+                cf_map::BONSAI_CONTRACT_TRIE,
+                cf_map::BONSAI_CONTRACT_FLAT,
+                cf_map::BONSAI_CONTRACT_LOG,
+            ),
+            TrieKind::Storage => (
+                cf_map::BONSAI_CONTRACT_STORAGE_TRIE,
+                cf_map::BONSAI_CONTRACT_STORAGE_FLAT,
+                cf_map::BONSAI_CONTRACT_STORAGE_LOG,
+            ),
+            TrieKind::Class => (
+                cf_map::BONSAI_CLASS_TRIE,
+                cf_map::BONSAI_CLASS_FLAT,
+                cf_map::BONSAI_CLASS_LOG,
+            ),
+        };
+
+        Some(TrieSpec {
+            identifier,
+            trie_cf: trie_cf.to_string(),
+            flat_cf: flat_cf.to_string(),
+            log_cf: log_cf.to_string(),
+        })
+    }
+
+    fn render_status(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("DB Path:");
+            ui.text_edit_singleline(&mut self.db_path_input);
+            if ui.button("Open").clicked() {
+                self.db = None;
+                self.ensure_db();
+            }
+        });
+
+        if let Some(err) = &self.db_error {
+            ui.colored_label(egui::Color32::RED, err);
+        }
+    }
+
+    fn render_stats(&mut self, ui: &mut egui::Ui) {
+        self.ensure_db();
+        self.render_status(ui);
+        ui.separator();
+
+        let Some(db) = &self.db else {
+            ui.label("DB not opened.");
+            return;
+        };
+
+        ui.heading("Column Families");
+        ui.label(format!("Total: {}", db.cf_names().len()));
+        egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+            for name in db.cf_names() {
+                let required = cf_map::BONSAI_COLUMNS.contains(&name.as_str());
+                if required {
+                    ui.label(format!("{name} (bonsai)"));
+                } else {
+                    ui.label(name);
+                }
+            }
+        });
+    }
+
+    fn render_tree(&mut self, ui: &mut egui::Ui) {
+        self.ensure_db();
+        self.render_status(ui);
+        ui.separator();
+
+        let Some(db) = &self.db else {
+            ui.label("DB not opened.");
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Trie:");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Contract, "Contract");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Storage, "Storage");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Class, "Class");
+        });
+
+        if self.tree_trie == TrieKind::Storage {
+            ui.horizontal(|ui| {
+                ui.label("Contract address:");
+                ui.text_edit_singleline(&mut self.storage_identifier_input);
+            });
+        }
+
+        let Some(spec) = self.build_spec(self.tree_trie) else {
+            ui.label("Provide a valid contract address for storage trie.");
+            return;
+        };
+
+        let mut reader = TrieReader::new(db.clone(), spec);
+        let Some(root) = reader.load_root_node() else {
+            ui.label("Empty trie or root missing.");
+            return;
+        };
+
+        ui.separator();
+        ui.heading("Tree");
+        let root_path = PathBits::default();
+        render_node(ui, &mut reader, &root_path, &root, 0);
+    }
+
+    fn render_path_trace(&mut self, ui: &mut egui::Ui) {
+        self.ensure_db();
+        self.render_status(ui);
+        ui.separator();
+
+        let Some(db) = &self.db else {
+            ui.label("DB not opened.");
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Trie:");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Contract, "Contract");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Storage, "Storage");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Class, "Class");
+        });
+        if self.tree_trie == TrieKind::Storage {
+            ui.horizontal(|ui| {
+                ui.label("Contract address:");
+                ui.text_edit_singleline(&mut self.storage_identifier_input);
+            });
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Key (hex felt):");
+            ui.text_edit_singleline(&mut self.key_input);
+            if ui.button("Trace").clicked() {
+                self.path_trace_status.clear();
+            }
+        });
+
+        let Some(spec) = self.build_spec(self.tree_trie) else {
+            ui.label("Provide a valid contract address for storage trie.");
+            return;
+        };
+        let mut reader = TrieReader::new(db.clone(), spec);
+
+        let felt = match parse_felt_hex(&self.key_input) {
+            Ok(felt) => felt,
+            Err(err) => {
+                ui.colored_label(egui::Color32::RED, err);
+                return;
+            }
+        };
+
+        let key_path = felt_to_path(&felt);
+        let mut path = PathBits::default();
+        let mut steps: Vec<String> = Vec::new();
+
+        let Some(mut node) = reader.load_root_node() else {
+            ui.label("Empty trie.");
+            return;
+        };
+
+        loop {
+            match &node {
+                Node::Binary(bin) => {
+                    let bit_index = path.len();
+                    if bit_index >= key_path.len() {
+                        self.path_trace_status = "Reached end of key.".to_string();
+                        break;
+                    }
+                    let direction = key_path.0[bit_index];
+                    let dir_str = if direction { "R" } else { "L" };
+                    steps.push(format!(
+                        "Binary h={} hash={} -> {dir_str}",
+                        bin.height,
+                        bin.hash.map(|h| format_felt_short(&h)).unwrap_or("none".to_string())
+                    ));
+                    path.push(direction);
+                }
+                Node::Edge(edge) => {
+                    let edge_bits = PathBits(edge.path.0.clone());
+                    let matches = key_path.0.get(path.len()..(path.len() + edge_bits.len()))
+                        == Some(&edge_bits.0);
+                    steps.push(format!(
+                        "Edge h={} path_len={} match={}",
+                        edge.height,
+                        edge_bits.len(),
+                        matches
+                    ));
+                    path.extend_from_bitslice(&edge_bits.0);
+                    if !matches {
+                        self.path_trace_status = "Path mismatch (non-member).".to_string();
+                        break;
+                    }
+                }
+            }
+
+            if path.len() >= key_path.len() {
+                let value = reader.load_flat_value(&key_path);
+                self.path_trace_status = match value {
+                    Some(value) => format!("Leaf value: {}", value.to_string()),
+                    None => "Leaf not found".to_string(),
+                };
+                break;
+            }
+
+            match reader.load_node_by_path(&path) {
+                Some(next) => node = next,
+                None => {
+                    self.path_trace_status = "Missing node in trie".to_string();
+                    break;
+                }
+            }
+        }
+
+        ui.separator();
+        ui.heading("Steps");
+        egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+            for (idx, step) in steps.iter().enumerate() {
+                ui.label(format!("{:02}: {step}", idx + 1));
+            }
+        });
+
+        if !self.path_trace_status.is_empty() {
+            ui.separator();
+            ui.label(&self.path_trace_status);
+        }
+    }
+
+    fn render_diff(&mut self, ui: &mut egui::Ui) {
+        self.ensure_db();
+        self.render_status(ui);
+        ui.separator();
+
+        let Some(db) = &self.db else {
+            ui.label("DB not opened.");
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Block:");
+            ui.text_edit_singleline(&mut self.diff_block_input);
+            ui.label("Trie:");
+            ui.selectable_value(&mut self.diff_trie, TrieKind::Contract, "Contract");
+            ui.selectable_value(&mut self.diff_trie, TrieKind::Storage, "Storage");
+            ui.selectable_value(&mut self.diff_trie, TrieKind::Class, "Class");
+        });
+
+        let block: u64 = match self.diff_block_input.trim().parse() {
+            Ok(val) => val,
+            Err(_) => {
+                ui.label("Enter a block number.");
+                return;
+            }
+        };
+
+        let log_cf = match self.diff_trie {
+            TrieKind::Contract => cf_map::BONSAI_CONTRACT_LOG,
+            TrieKind::Storage => cf_map::BONSAI_CONTRACT_STORAGE_LOG,
+            TrieKind::Class => cf_map::BONSAI_CLASS_LOG,
+        };
+
+        let entries = read_block_log(db, log_cf, block);
+
+        ui.separator();
+        ui.label(format!("Entries: {}", entries.len()));
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for entry in entries {
+                let key_bits = entry
+                    .key_bits
+                    .as_ref()
+                    .map(|k| format!("len={}", k.len()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                ui.label(format!(
+                    "{} {:?} key_type={} change={} key={} value={}",
+                    entry.block,
+                    entry.trie_kind,
+                    entry.key_type,
+                    entry.change_type,
+                    key_bits,
+                    bytes_to_hex(&entry.value)
+                ));
+            }
+        });
+    }
+
+    fn render_proof(&mut self, ui: &mut egui::Ui) {
+        self.ensure_db();
+        self.render_status(ui);
+        ui.separator();
+
+        let Some(db) = &self.db else {
+            ui.label("DB not opened.");
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Trie:");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Contract, "Contract");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Storage, "Storage");
+            ui.selectable_value(&mut self.tree_trie, TrieKind::Class, "Class");
+        });
+        if self.tree_trie == TrieKind::Storage {
+            ui.horizontal(|ui| {
+                ui.label("Contract address:");
+                ui.text_edit_singleline(&mut self.storage_identifier_input);
+            });
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Key (hex felt):");
+            ui.text_edit_singleline(&mut self.key_input);
+            if ui.button("Build Proof").clicked() {
+                self.proof_status.clear();
+            }
+        });
+
+        let Some(spec) = self.build_spec(self.tree_trie) else {
+            ui.label("Provide a valid contract address for storage trie.");
+            return;
+        };
+        let mut reader = TrieReader::new(db.clone(), spec);
+
+        let felt = match parse_felt_hex(&self.key_input) {
+            Ok(felt) => felt,
+            Err(err) => {
+                ui.colored_label(egui::Color32::RED, err);
+                return;
+            }
+        };
+        let key_path = felt_to_path(&felt);
+
+        let Some(root_node) = reader.load_root_node() else {
+            ui.label("Empty trie.");
+            return;
+        };
+        let root_hash = match root_node {
+            Node::Binary(bin) => bin.hash,
+            Node::Edge(edge) => edge.hash,
+        };
+
+        let Some(root_hash) = root_hash else {
+            ui.label("Root hash not found.");
+            return;
+        };
+
+        let proof = match build_proof(&mut reader, &key_path) {
+            Some(proof) => proof,
+            None => {
+                ui.label("Failed to build proof.");
+                return;
+            }
+        };
+
+        let verified = verify_proof(root_hash, &key_path, &proof, self.tree_trie);
+        self.proof_status = if verified {
+            "Proof verified".to_string()
+        } else {
+            "Proof failed".to_string()
+        };
+
+        ui.separator();
+        ui.label(&self.proof_status);
+        ui.label(format!("Proof nodes: {}", proof.len()));
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (idx, node) in proof.iter().enumerate() {
+                let _ = match node {
+                    ProofNode::Binary { left, right } => ui.label(format!(
+                        "{:02} Binary L={} R={}",
+                        idx + 1,
+                        format_felt_short(left),
+                        format_felt_short(right)
+                    )),
+                    ProofNode::Edge { child, path } => ui.label(format!(
+                        "{:02} Edge path_len={} child={}",
+                        idx + 1,
+                        path.len(),
+                        format_felt_short(child)
+                    )),
+                };
+            }
+        });
     }
 }
 
@@ -51,32 +496,77 @@ impl eframe::App for BonsaiApp {
             ui.selectable_value(&mut self.active_tab, Tab::Stats, "Stats");
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.active_tab {
-                Tab::Tree => {
-                    ui.heading("Tree View");
-                    ui.label("Tree rendering will appear here.");
-                }
-                Tab::Path => {
-                    ui.heading("Path Trace");
-                    ui.label("Key path tracing UI will appear here.");
-                }
-                Tab::Diff => {
-                    ui.heading("Diff View");
-                    ui.label("Block diff view will appear here.");
-                }
-                Tab::Proof => {
-                    ui.heading("Proof Viewer");
-                    ui.label("Merkle proof visualizer will appear here.");
-                }
-                Tab::Stats => {
-                    ui.heading("DB Stats");
-                    ui.label("Database stats and diagnostics will appear here.");
-                }
-            }
-
-            ui.separator();
-            ui.label(format!("Args: db_path={:?} block={:?} diff={:?}", self.args.db_path, self.args.block, self.args.diff));
+        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+            Tab::Tree => self.render_tree(ui),
+            Tab::Path => self.render_path_trace(ui),
+            Tab::Diff => self.render_diff(ui),
+            Tab::Proof => self.render_proof(ui),
+            Tab::Stats => self.render_stats(ui),
         });
     }
+}
+
+fn render_node(ui: &mut egui::Ui, reader: &mut TrieReader, path: &PathBits, node: &Node, depth: usize) {
+    let title = match node {
+        Node::Binary(binary) => format!(
+            "Binary h={} path_len={} hash={}",
+            binary.height,
+            path.len(),
+            binary
+                .hash
+                .map(|h| format_felt_short(&h))
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        Node::Edge(edge) => format!(
+            "Edge h={} path_len={} edge_len={} hash={}",
+            edge.height,
+            path.len(),
+            edge.path.len(),
+            edge.hash
+                .map(|h| format_felt_short(&h))
+                .unwrap_or_else(|| "none".to_string())
+        ),
+    };
+
+    CollapsingHeader::new(title)
+        .default_open(depth < 2)
+        .show(ui, |ui| match node {
+            Node::Binary(binary) => {
+                ui.label(format!("Left hash: {}", format_node_hash(binary.left)));
+                ui.label(format!("Right hash: {}", format_node_hash(binary.right)));
+
+                let left_path = path.with_bit(false);
+                let right_path = path.with_bit(true);
+
+                if let Some(left_node) = reader.load_node_by_path(&left_path) {
+                    render_node(ui, reader, &left_path, &left_node, depth + 1);
+                } else {
+                    ui.label("Left child missing");
+                }
+
+                if let Some(right_node) = reader.load_node_by_path(&right_path) {
+                    render_node(ui, reader, &right_path, &right_node, depth + 1);
+                } else {
+                    ui.label("Right child missing");
+                }
+            }
+            Node::Edge(edge) => {
+                let edge_bits = PathBits(edge.path.0.clone());
+                let mut child_path = path.clone();
+                child_path.extend_from_bitslice(edge_bits.0.as_bitslice());
+                ui.label(format!("Child hash: {}", format_node_hash(edge.child)));
+                if let Some(child_node) = reader.load_node_by_path(&child_path) {
+                    render_node(ui, reader, &child_path, &child_node, depth + 1);
+                } else {
+                    ui.label("Child missing");
+                }
+            }
+        });
+}
+
+fn format_node_hash(handle: crate::bonsai::node::NodeHandle) -> String {
+    handle
+        .as_hash()
+        .map(|h| format_felt_short(&h))
+        .unwrap_or_else(|| "in-memory".to_string())
 }
