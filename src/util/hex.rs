@@ -1,4 +1,5 @@
 use starknet_types_core::felt::Felt;
+use parity_scale_codec::Decode;
 
 pub fn parse_felt_hex(input: &str) -> Result<Felt, String> {
     let s = input.trim();
@@ -23,4 +24,9 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{:02x}", b));
     }
     s
+}
+
+pub fn decode_felt_scale(bytes: &[u8]) -> Option<Felt> {
+    let mut slice = bytes;
+    Felt::decode(&mut slice).ok()
 }
