@@ -1,0 +1,12 @@
+[package]
+name = "bonsai-trie-visualizer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+eframe = "0.31"
+egui = "0.31"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
