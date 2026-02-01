@@ -21,6 +21,8 @@ pub fn App() -> impl IntoView {
     let (root, set_root) = signal::<Option<RootResponse>>(None);
     let (nodes, set_nodes) = signal(std::collections::HashMap::<String, NodeResponse>::new());
     let (loading_paths, set_loading_paths) = signal(std::collections::HashSet::<String>::new());
+    let (search_input, set_search_input) = signal(String::new());
+    let (search_target, set_search_target) = signal::<Option<String>>(None);
 
     let (diff_block, set_diff_block) = signal(String::new());
     let (diff_resp, set_diff_resp) = signal::<Option<DiffResponse>>(None);
@@ -155,6 +157,30 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let on_search = {
+        let on_node = on_node.clone();
+        move || {
+            let query = search_input.get();
+            if query.is_empty() {
+                return;
+            }
+            let nodes_map = nodes.get();
+            let target = if let Some(found) = nodes_map.iter().find_map(|(path, node)| {
+                node.node
+                    .as_ref()
+                    .and_then(|n| n.hash.as_ref())
+                    .filter(|h| h.eq_ignore_ascii_case(&query))
+                    .map(|_| path.clone())
+            }) {
+                found
+            } else {
+                query.clone()
+            };
+            set_search_target.set(Some(target.clone()));
+            on_node.run(target);
+        }
+    };
+
     let fetch_cfs = move || {
         spawn_local(async move {
             let Ok(resp) = Request::get(&format!("{API_BASE}/api/cfs")).send().await else { return; };
@@ -203,11 +229,16 @@ pub fn App() -> impl IntoView {
                         <button on:click=move |_| fetch_trace()>"Trace"</button>
                     </div>
                 </div>
+                <div class="panel">
+                    <label>"Search (Path/Hash)"</label>
+                    <input type="text" value=search_input on:input=move |ev| set_search_input.set(event_target_value(&ev)) />
+                    <button on:click=move |_| on_search()>"Go"</button>
+                </div>
             </aside>
 
             <main class="content">
                 <Show when=move || active_tab.get() == Tab::Tree fallback=|| ()>
-                    <TreeView root=root nodes=nodes loading=loading_paths on_root=fetch_root on_node=on_node />
+                    <TreeView root=root nodes=nodes loading=loading_paths search=search_target on_root=fetch_root on_node=on_node />
                 </Show>
                 <Show when=move || active_tab.get() == Tab::Path fallback=|| ()>
                     <PathView leaf=leaf_resp proof=proof_resp trace=trace_bits />
@@ -231,6 +262,7 @@ fn TreeView(
     root: ReadSignal<Option<RootResponse>>,
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
     loading: ReadSignal<std::collections::HashSet<String>>,
+    search: ReadSignal<Option<String>>,
     on_root: impl Fn() + 'static + Copy,
     on_node: Callback<String>,
 ) -> impl IntoView {
@@ -243,7 +275,7 @@ fn TreeView(
             <Show when=move || root.get().is_some() fallback=|| view! { <p class="muted">"No root loaded."</p> }>
                 {move || {
                     let root = root.get().unwrap();
-                    view! { <GraphView root=root nodes=nodes loading=loading on_node=on_node /> }
+                    view! { <GraphView root=root nodes=nodes loading=loading search=search on_node=on_node /> }
                 }}
             </Show>
         </section>
@@ -255,6 +287,7 @@ fn GraphView(
     root: RootResponse,
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
     loading: ReadSignal<std::collections::HashSet<String>>,
+    search: ReadSignal<Option<String>>,
     on_node: Callback<String>,
 ) -> impl IntoView {
     let root_path = root.path_hex.clone();
@@ -272,6 +305,11 @@ fn GraphView(
         let node_count = nodes_map.len();
         let data = build_graph(&root_for_graph, &nodes_map);
         (node_count, data)
+    });
+    Effect::new(move |_| {
+        if let Some(path) = search.get() {
+            set_selected.set(Some(path));
+        }
     });
 
     view! {
