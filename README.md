@@ -45,3 +45,6 @@ Final overview:
 
 Progressive render:
 ![Progressive](assets/screenshots/phase-8-progressive.png)
+
+Demo video:
+![Demo](assets/screenshots/demo.webm)
