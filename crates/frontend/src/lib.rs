@@ -687,20 +687,34 @@ fn DiffView(
 
 #[component]
 fn ProofView(proof: ReadSignal<Option<ProofResponse>>) -> impl IntoView {
+    let (show_json, set_show_json) = signal(false);
     view! {
         <section>
             <h2>"Proof"</h2>
             <Show when=move || proof.get().is_some() fallback=|| view! { <div><p class="muted">"No proof loaded."</p></div> }>
                 {move || {
                     let resp = proof.get().unwrap();
+                    let json = StoredValue::new(serde_json::to_string_pretty(&resp).unwrap_or_default());
                     view! {
                         <div>
-                            <p class="muted">{if resp.verified { "Verified" } else { "Not verified" }}</p>
-                            <ul class="list">
-                                {resp.nodes.into_iter().map(|n| view!{
-                                    <li>{n.kind} " " {n.path_len.unwrap_or_default()}</li>
-                                }).collect_view()}
-                            </ul>
+                            <div class="header-row">
+                                <p class="muted">{if resp.verified { "Verified" } else { "Not verified" }}</p>
+                                <button on:click=move |_| set_show_json.set(!show_json.get())>
+                                    {if show_json.get() { "Hide JSON" } else { "Show JSON" }}
+                                </button>
+                            </div>
+                            <div class="detail-card">
+                                <h3>"Proof Nodes"</h3>
+                                <p class="muted">"Total nodes: " {resp.nodes.len()}</p>
+                                <ul class="list">
+                                    {resp.nodes.into_iter().map(|n| view!{
+                                        <li>{n.kind} " path_len=" {n.path_len.unwrap_or_default()}</li>
+                                    }).collect_view()}
+                                </ul>
+                            </div>
+                            <Show when=move || show_json.get() fallback=|| ()>
+                                {move || view! { <pre class="code-block">{json.get_value()}</pre> }}
+                            </Show>
                         </div>
                     }
                 }}

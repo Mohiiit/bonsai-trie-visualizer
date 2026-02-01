@@ -143,6 +143,16 @@ body {
   letter-spacing: 0.08em;
   font-size: 10px;
 }
+.code-block {
+  background: #0f1320;
+  border: 1px solid #2a3142;
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 260px;
+}
 .graph {
   border: 1px solid #2f374a;
   background: radial-gradient(circle at top, rgba(34, 40, 58, 0.6), rgba(17, 20, 30, 0.95));
