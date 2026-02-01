@@ -1,6 +1,7 @@
 use bonsai_types::{CfsResponse, DiffResponse, LeafResponse, NodeResponse, ProofResponse, RootResponse, TrieKind};
 use gloo_net::http::Request;
 use leptos::prelude::*;
+use leptos::prelude::IntoAny;
 use leptos::task::spawn_local;
 use leptos::prelude::Callback;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -229,67 +230,92 @@ fn GraphView(
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
     on_node: Callback<String>,
 ) -> impl IntoView {
-    let nodes_map = nodes.get();
-    let node_count = nodes_map.len();
-    let data = build_graph(&root, &nodes_map);
-    let (width, height) = graph_bounds(&data);
-    let (x_gap, y_gap, padding) = graph_metrics();
-    let pad = padding * 0.5;
+    let root_path = root.path_hex.clone();
+    let root_node = root.node.clone();
+    let root_for_action = StoredValue::new(root_path.clone());
+    let root_for_graph = root.clone();
+    let (selected, set_selected) = signal::<Option<String>>(None);
+    let graph = Memo::new(move |_| {
+        let nodes_map = nodes.get();
+        let node_count = nodes_map.len();
+        let data = build_graph(&root_for_graph, &nodes_map);
+        (node_count, data)
+    });
 
     view! {
         <div class="graph">
-            <div class="graph-help">
-                <p class="muted">"Loaded nodes: " {node_count} ". Click a node to load its children."</p>
-            </div>
-            <button class="graph-action" on:click=move |_| on_node.run(root.path_hex.clone())>"Load Root Node"</button>
-            <svg
-                class="graph-svg"
-                viewBox=format!("0 0 {} {}", width, height)
-                width="100%"
-                height="100%"
-            >
-                {data.edges.into_iter().map(|edge| {
-                    let x1 = edge.from_x * x_gap + pad;
-                    let y1 = edge.from_y * y_gap + pad;
-                    let x2 = edge.to_x * x_gap + pad;
-                    let y2 = edge.to_y * y_gap + pad;
-                    view! {
-                        <line
-                            class="graph-edge"
-                            x1=x1
-                            y1=y1
-                            x2=x2
-                            y2=y2
-                        />
-                    }
-                }).collect_view()}
-                {data.nodes.into_iter().map(|node| {
-                    let on_node = on_node.clone();
-                    let node_path = node.path.clone();
-                    let node_data = node.node.clone();
-                    let kind = node.kind.clone();
-                    let x = node.x * x_gap + pad;
-                    let y = node.y * y_gap + pad;
-                    view! {
-                        <g class="graph-node" on:click=move |_| {
-                            on_node.run(node_path.clone());
-                            if let Some(node_data) = node_data.clone() {
-                                for child in child_paths(&node_path, &node_data) {
-                                    on_node.run(child);
+            {move || {
+                let (node_count, data) = graph.get();
+                let (width, height) = graph_bounds(&data);
+                let (x_gap, y_gap, padding) = graph_metrics();
+                let pad = padding * 0.5;
+                view! {
+                    <>
+                        <div class="graph-header">
+                            <div class="graph-help">
+                                <p class="muted">"Loaded nodes: " {node_count + 1} ". Click a node to load its children."</p>
+                            </div>
+                            <button class="graph-action" on:click=move |_| on_node.run(root_for_action.get_value())>"Load Root Node"</button>
+                        </div>
+                        <div class="graph-stage">
+                            <div class="graph-detail">
+                                {render_selection(selected, nodes, root_path.clone(), root_node.clone())}
+                            </div>
+                        <svg
+                            class="graph-svg"
+                            viewBox=format!("0 0 {} {}", width, height)
+                            width="100%"
+                            height="100%"
+                        >
+                            {data.edges.into_iter().map(|edge| {
+                                let x1 = edge.from_x * x_gap + pad;
+                                let y1 = edge.from_y * y_gap + pad;
+                                let x2 = edge.to_x * x_gap + pad;
+                                let y2 = edge.to_y * y_gap + pad;
+                                view! {
+                                    <line
+                                        class="graph-edge"
+                                        x1=x1
+                                        y1=y1
+                                        x2=x2
+                                        y2=y2
+                                    />
                                 }
-                            }
-                        }>
-                            <circle class=format!("graph-dot {}", kind) cx=x cy=y r="18" />
-                            <text class="graph-label" x=x y=y>{short_kind(&kind)}</text>
-                        </g>
-                    }
-                }).collect_view()}
-            </svg>
+                            }).collect_view()}
+                            {data.nodes.into_iter().map(|node| {
+                                let on_node = on_node.clone();
+                                let set_selected = set_selected;
+                                let node_path = node.path.clone();
+                                let node_data = node.node.clone();
+                                let kind = node.kind.clone();
+                                let x = node.x * x_gap + pad;
+                                let y = node.y * y_gap + pad;
+                                let is_selected = selected.get().as_ref().map(|p| p == &node_path).unwrap_or(false);
+                                view! {
+                                    <g class="graph-node" on:click=move |_| {
+                                        set_selected.set(Some(node_path.clone()));
+                                        on_node.run(node_path.clone());
+                                        if let Some(node_data) = node_data.clone() {
+                                            for child in child_paths(&node_path, &node_data) {
+                                                on_node.run(child);
+                                            }
+                                        }
+                                    }>
+                                        <circle class=format!("graph-dot {} {}", kind, if is_selected { "selected" } else { "" }) cx=x cy=y r="18" />
+                                        <text class="graph-label" x=x y=y>{short_kind(&kind)}</text>
+                                    </g>
+                                }
+                            }).collect_view()}
+                        </svg>
+                        </div>
+                    </>
+                }
+            }}
         </div>
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct GraphNode {
     path: String,
     kind: String,
@@ -298,7 +324,7 @@ struct GraphNode {
     y: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct GraphEdge {
     from_x: f32,
     from_y: f32,
@@ -306,7 +332,7 @@ struct GraphEdge {
     to_y: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct GraphData {
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
@@ -409,6 +435,57 @@ fn short_kind(kind: &str) -> String {
         "binary" => "B".to_string(),
         "edge" => "E".to_string(),
         other => other.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
+    }
+}
+
+fn render_selection(
+    selected: ReadSignal<Option<String>>,
+    nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
+    root_path: String,
+    root_node: Option<bonsai_types::NodeView>,
+) -> impl IntoView {
+    let root_path = StoredValue::new(root_path);
+    let root_node = StoredValue::new(root_node);
+    view! {
+        <div class="detail-card">
+            <h3>"Node Details"</h3>
+            <Show
+                when=move || selected.get().is_some()
+                fallback=|| view! { <p class="muted">"Select a node to see details."</p> }
+            >
+                {move || {
+                    let path = selected.get().unwrap_or_default();
+                    let node = if path == root_path.get_value() {
+                        root_node.get_value()
+                    } else {
+                        nodes.get().get(&path).and_then(|n| n.node.clone())
+                    };
+                    match node {
+                        Some(node) => view! {
+                            <div class="detail-grid">
+                                <div>
+                                    <span class="label">"Path"</span>
+                                    <span>{path}</span>
+                                </div>
+                                <div>
+                                    <span class="label">"Kind"</span>
+                                    <span>{node.kind}</span>
+                                </div>
+                                <div>
+                                    <span class="label">"Height"</span>
+                                    <span>{node.height}</span>
+                                </div>
+                                <div>
+                                    <span class="label">"Hash"</span>
+                                    <span class="mono">{node.hash.unwrap_or_else(|| "none".to_string())}</span>
+                                </div>
+                            </div>
+                        }.into_any(),
+                        None => view! { <p class="muted">"Node not loaded."</p> }.into_any(),
+                    }
+                }}
+            </Show>
+        </div>
     }
 }
 

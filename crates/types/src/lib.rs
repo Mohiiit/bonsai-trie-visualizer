@@ -18,7 +18,7 @@ impl TrieKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeView {
     pub kind: String,
     pub height: u64,
@@ -30,25 +30,25 @@ pub struct NodeView {
     pub path_hex: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RootResponse {
     pub path_hex: String,
     pub node: Option<NodeView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeResponse {
     pub path_hex: String,
     pub node: Option<NodeView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LeafResponse {
     pub key: String,
     pub value: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiffEntry {
     pub block: u64,
     pub key_type: String,
@@ -57,12 +57,12 @@ pub struct DiffEntry {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiffResponse {
     pub entries: Vec<DiffEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProofNodeJson {
     pub kind: String,
     pub left: Option<String>,
@@ -71,7 +71,7 @@ pub struct ProofNodeJson {
     pub path_len: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProofResponse {
     pub verified: bool,
     pub nodes: Vec<ProofNodeJson>,

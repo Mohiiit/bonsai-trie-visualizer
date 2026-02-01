@@ -136,6 +136,23 @@ body {
 .graph-help {
   margin-bottom: 8px;
 }
+.graph-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.graph-stage {
+  display: grid;
+  grid-template-columns: minmax(220px, 260px) 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.graph-detail {
+  position: sticky;
+  top: 12px;
+}
 .graph-action {
   margin-bottom: 12px;
   background: #f2c94c;
@@ -162,6 +179,10 @@ body {
   stroke: #7aa2ff;
   stroke-width: 2;
 }
+.graph-dot.selected {
+  stroke: #f2c94c;
+  stroke-width: 3;
+}
 .graph-dot.edge {
   stroke: #f2c94c;
 }
@@ -176,6 +197,43 @@ body {
   text-anchor: middle;
   dominant-baseline: central;
   pointer-events: none;
+}
+.detail-card {
+  border: 1px solid #2f374a;
+  border-radius: 12px;
+  background: #151a24;
+  padding: 12px;
+}
+.detail-card h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.detail-grid {
+  display: grid;
+  gap: 8px;
+}
+.detail-grid .label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.detail-grid .mono {
+  font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+@media (max-width: 960px) {
+  .graph-stage {
+    grid-template-columns: 1fr;
+  }
+  .graph-detail {
+    position: static;
+  }
 }
 @media (max-width: 960px) {
   .app { grid-template-columns: 1fr; }
