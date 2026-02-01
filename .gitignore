@@ -1,3 +1,5 @@
 .DS_Store
 assets_readme.png
 target/
+dist/
+node_modules/

@@ -1,0 +1,621 @@
+use bonsai_types::{CfsResponse, DiffResponse, LeafResponse, NodeResponse, ProofResponse, RootResponse, TrieKind};
+use gloo_net::http::Request;
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use leptos::prelude::Callback;
+use wasm_bindgen::prelude::wasm_bindgen;
+
+const API_BASE: &str = "http://127.0.0.1:4010";
+
+#[component]
+pub fn App() -> impl IntoView {
+    let (active_tab, set_active_tab) = signal(Tab::Tree);
+    let (db_path, set_db_path) = signal(String::new());
+    let (db_status, set_db_status) = signal(String::new());
+
+    let (trie_kind, set_trie_kind) = signal(TrieKind::Contract);
+    let (identifier, set_identifier) = signal(String::new());
+    let (key_input, set_key_input) = signal(String::new());
+
+    let (root, set_root) = signal::<Option<RootResponse>>(None);
+    let (nodes, set_nodes) = signal(std::collections::HashMap::<String, NodeResponse>::new());
+
+    let (diff_block, set_diff_block) = signal(String::new());
+    let (diff_resp, set_diff_resp) = signal::<Option<DiffResponse>>(None);
+
+    let (proof_resp, set_proof_resp) = signal::<Option<ProofResponse>>(None);
+    let (leaf_resp, set_leaf_resp) = signal::<Option<LeafResponse>>(None);
+
+    let (cfs_resp, set_cfs_resp) = signal::<Option<CfsResponse>>(None);
+
+    let open_db = move || {
+        let path = db_path.get();
+        if path.is_empty() {
+            set_db_status.set("DB path missing".to_string());
+            return;
+        }
+        spawn_local(async move {
+            let path = if path.ends_with("/db") { path } else { format!("{path}/db") };
+            let url = format!("{API_BASE}/api/open?db_path={}", urlencoding::encode(&path));
+            let _ = Request::post(&url).send().await;
+            set_db_status.set(format!("DB open requested: {path}"));
+        });
+    };
+
+    let on_node = Callback::new(move |path_hex: String| {
+        let trie = trie_kind.get();
+        let ident = identifier.get();
+        spawn_local(async move {
+            let mut url = format!("{API_BASE}/api/trie/node?trie={}&path={}", format_trie(trie), urlencoding::encode(&path_hex));
+            if trie == TrieKind::Storage && !ident.is_empty() {
+                url.push_str(&format!("&identifier={}", urlencoding::encode(&ident)));
+            }
+            let Ok(resp) = Request::get(&url).send().await else { return; };
+            let Ok(data) = resp.json::<NodeResponse>().await else { return; };
+            set_nodes.update(|map| {
+                map.insert(path_hex, data);
+            });
+        });
+    });
+
+    let fetch_root = {
+        let on_node = on_node.clone();
+        move || {
+            let trie = trie_kind.get();
+            let ident = identifier.get();
+            spawn_local(async move {
+                let mut url = format!("{API_BASE}/api/trie/root?trie={}", format_trie(trie));
+                if trie == TrieKind::Storage && !ident.is_empty() {
+                    url.push_str(&format!("&identifier={}", urlencoding::encode(&ident)));
+                }
+                let Ok(resp) = Request::get(&url).send().await else { return; };
+                let Ok(data) = resp.json::<RootResponse>().await else { return; };
+                if let Some(node) = data.node.clone() {
+                    for child in child_paths(&data.path_hex, &node) {
+                        on_node.run(child);
+                    }
+                }
+                set_root.set(Some(data));
+            });
+        }
+    };
+
+    let fetch_leaf = move || {
+        let trie = trie_kind.get();
+        let ident = identifier.get();
+        let key = key_input.get();
+        if key.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            let mut url = format!("{API_BASE}/api/trie/leaf?trie={}&key={}", format_trie(trie), urlencoding::encode(&key));
+            if trie == TrieKind::Storage && !ident.is_empty() {
+                url.push_str(&format!("&identifier={}", urlencoding::encode(&ident)));
+            }
+            let Ok(resp) = Request::get(&url).send().await else { return; };
+            let Ok(data) = resp.json::<LeafResponse>().await else { return; };
+            set_leaf_resp.set(Some(data));
+        });
+    };
+
+    let fetch_diff = move || {
+        let trie = trie_kind.get();
+        let block = diff_block.get();
+        if block.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            let url = format!("{API_BASE}/api/diff?trie={}&block={}", format_trie(trie), block);
+            let Ok(resp) = Request::get(&url).send().await else { return; };
+            let Ok(data) = resp.json::<DiffResponse>().await else { return; };
+            set_diff_resp.set(Some(data));
+        });
+    };
+
+    let fetch_proof = move || {
+        let trie = trie_kind.get();
+        let ident = identifier.get();
+        let key = key_input.get();
+        if key.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            let mut url = format!("{API_BASE}/api/proof?trie={}&key={}", format_trie(trie), urlencoding::encode(&key));
+            if trie == TrieKind::Storage && !ident.is_empty() {
+                url.push_str(&format!("&identifier={}", urlencoding::encode(&ident)));
+            }
+            let Ok(resp) = Request::get(&url).send().await else { return; };
+            let Ok(data) = resp.json::<ProofResponse>().await else { return; };
+            set_proof_resp.set(Some(data));
+        });
+    };
+
+    let fetch_cfs = move || {
+        spawn_local(async move {
+            let Ok(resp) = Request::get(&format!("{API_BASE}/api/cfs")).send().await else { return; };
+            let Ok(data) = resp.json::<CfsResponse>().await else { return; };
+            set_cfs_resp.set(Some(data));
+        });
+    };
+
+    view! {
+        <div class="app">
+            <aside class="sidebar">
+                <h1>"Bonsai Trie Visualizer"</h1>
+                <nav>
+                    <button class=tab_class(active_tab, Tab::Tree) on:click=move |_| set_active_tab.set(Tab::Tree)>"Tree"</button>
+                    <button class=tab_class(active_tab, Tab::Path) on:click=move |_| set_active_tab.set(Tab::Path)>"Path Trace"</button>
+                    <button class=tab_class(active_tab, Tab::Diff) on:click=move |_| set_active_tab.set(Tab::Diff)>"Diff"</button>
+                    <button class=tab_class(active_tab, Tab::Proof) on:click=move |_| set_active_tab.set(Tab::Proof)>"Proof"</button>
+                    <button class=tab_class(active_tab, Tab::Stats) on:click=move |_| set_active_tab.set(Tab::Stats)>"Stats"</button>
+                </nav>
+                <div class="panel">
+                    <label>"DB Path"</label>
+                    <input type="text" value=db_path on:input=move |ev| set_db_path.set(event_target_value(&ev)) />
+                    <button on:click=move |_| open_db()>"Open"</button>
+                    <p class="muted">{move || db_status.get()}</p>
+                </div>
+                <div class="panel">
+                    <label>"Trie"</label>
+                    <select on:change=move |ev| {
+                        let v = event_target_value(&ev);
+                        let kind = match v.as_str() { "contract" => TrieKind::Contract, "storage" => TrieKind::Storage, _ => TrieKind::Class };
+                        set_trie_kind.set(kind);
+                    }>
+                        <option value="contract">"Contract"</option>
+                        <option value="storage">"Storage"</option>
+                        <option value="class">"Class"</option>
+                    </select>
+                    <label>"Storage Identifier"</label>
+                    <input type="text" value=identifier on:input=move |ev| set_identifier.set(event_target_value(&ev)) />
+                </div>
+                <div class="panel">
+                    <label>"Key"</label>
+                    <input type="text" value=key_input on:input=move |ev| set_key_input.set(event_target_value(&ev)) />
+                    <div class="row">
+                        <button on:click=move |_| fetch_leaf()>"Leaf"</button>
+                        <button on:click=move |_| fetch_proof()>"Proof"</button>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="content">
+                <Show when=move || active_tab.get() == Tab::Tree fallback=|| ()>
+                    <TreeView root=root nodes=nodes on_root=fetch_root on_node=on_node />
+                </Show>
+                <Show when=move || active_tab.get() == Tab::Path fallback=|| ()>
+                    <PathView leaf=leaf_resp />
+                </Show>
+                <Show when=move || active_tab.get() == Tab::Diff fallback=|| ()>
+                    <DiffView block=diff_block diff=diff_resp on_block=set_diff_block on_fetch=fetch_diff />
+                </Show>
+                <Show when=move || active_tab.get() == Tab::Proof fallback=|| ()>
+                    <ProofView proof=proof_resp />
+                </Show>
+                <Show when=move || active_tab.get() == Tab::Stats fallback=|| ()>
+                    <StatsView cfs=cfs_resp on_fetch=fetch_cfs />
+                </Show>
+            </main>
+        </div>
+    }
+}
+
+#[component]
+fn TreeView(
+    root: ReadSignal<Option<RootResponse>>,
+    nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
+    on_root: impl Fn() + 'static + Copy,
+    on_node: Callback<String>,
+) -> impl IntoView {
+    view! {
+        <section>
+            <div class="header-row">
+                <h2>"Trie Tree"</h2>
+                <button on:click=move |_| on_root()>"Load Root"</button>
+            </div>
+            <Show when=move || root.get().is_some() fallback=|| view! { <p class="muted">"No root loaded."</p> }>
+                {move || {
+                    let root = root.get().unwrap();
+                    view! { <GraphView root=root nodes=nodes on_node=on_node /> }
+                }}
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn GraphView(
+    root: RootResponse,
+    nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
+    on_node: Callback<String>,
+) -> impl IntoView {
+    let nodes_map = nodes.get();
+    let node_count = nodes_map.len();
+    let data = build_graph(&root, &nodes_map);
+    let (width, height) = graph_bounds(&data);
+    let (x_gap, y_gap, padding) = graph_metrics();
+    let pad = padding * 0.5;
+
+    view! {
+        <div class="graph">
+            <div class="graph-help">
+                <p class="muted">"Loaded nodes: " {node_count} ". Click a node to load its children."</p>
+            </div>
+            <button class="graph-action" on:click=move |_| on_node.run(root.path_hex.clone())>"Load Root Node"</button>
+            <svg
+                class="graph-svg"
+                viewBox=format!("0 0 {} {}", width, height)
+                width="100%"
+                height="100%"
+            >
+                {data.edges.into_iter().map(|edge| {
+                    let x1 = edge.from_x * x_gap + pad;
+                    let y1 = edge.from_y * y_gap + pad;
+                    let x2 = edge.to_x * x_gap + pad;
+                    let y2 = edge.to_y * y_gap + pad;
+                    view! {
+                        <line
+                            class="graph-edge"
+                            x1=x1
+                            y1=y1
+                            x2=x2
+                            y2=y2
+                        />
+                    }
+                }).collect_view()}
+                {data.nodes.into_iter().map(|node| {
+                    let on_node = on_node.clone();
+                    let node_path = node.path.clone();
+                    let node_data = node.node.clone();
+                    let kind = node.kind.clone();
+                    let x = node.x * x_gap + pad;
+                    let y = node.y * y_gap + pad;
+                    view! {
+                        <g class="graph-node" on:click=move |_| {
+                            on_node.run(node_path.clone());
+                            if let Some(node_data) = node_data.clone() {
+                                for child in child_paths(&node_path, &node_data) {
+                                    on_node.run(child);
+                                }
+                            }
+                        }>
+                            <circle class=format!("graph-dot {}", kind) cx=x cy=y r="18" />
+                            <text class="graph-label" x=x y=y>{short_kind(&kind)}</text>
+                        </g>
+                    }
+                }).collect_view()}
+            </svg>
+        </div>
+    }
+}
+
+#[derive(Clone)]
+struct GraphNode {
+    path: String,
+    kind: String,
+    node: Option<bonsai_types::NodeView>,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone)]
+struct GraphEdge {
+    from_x: f32,
+    from_y: f32,
+    to_x: f32,
+    to_y: f32,
+}
+
+#[derive(Clone)]
+struct GraphData {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+
+fn build_graph(root: &RootResponse, nodes: &std::collections::HashMap<String, NodeResponse>) -> GraphData {
+    let mut data = GraphData { nodes: Vec::new(), edges: Vec::new() };
+    let mut next_x = 0.0_f32;
+    let root_path = root.path_hex.clone();
+    let root_node = root
+        .node
+        .clone()
+        .or_else(|| nodes.get(&root_path).and_then(|n| n.node.clone()));
+    walk_graph(&root_path, root_node, nodes, 0, &mut next_x, &mut data);
+    data
+}
+
+fn walk_graph(
+    path: &str,
+    node: Option<bonsai_types::NodeView>,
+    nodes: &std::collections::HashMap<String, NodeResponse>,
+    depth: usize,
+    next_x: &mut f32,
+    data: &mut GraphData,
+) -> f32 {
+    let mut child_centers = Vec::new();
+    if let Some(node_data) = node.clone() {
+        for child_path in child_paths(path, &node_data) {
+            if let Some(child_node) = nodes.get(&child_path).and_then(|n| n.node.clone()) {
+                let child_x = walk_graph(&child_path, Some(child_node), nodes, depth + 1, next_x, data);
+                child_centers.push(child_x);
+            }
+        }
+    }
+
+    let x = if child_centers.is_empty() {
+        let x = *next_x;
+        *next_x += 1.0;
+        x
+    } else {
+        let first = child_centers.first().copied().unwrap_or(0.0);
+        let last = child_centers.last().copied().unwrap_or(first);
+        (first + last) * 0.5
+    };
+
+    let y = depth as f32;
+    data.nodes.push(GraphNode {
+        path: path.to_string(),
+        kind: node.as_ref().map(|n| n.kind.clone()).unwrap_or_else(|| "missing".to_string()),
+        node,
+        x,
+        y,
+    });
+
+    for child_x in child_centers {
+        data.edges.push(GraphEdge {
+            from_x: x,
+            from_y: y,
+            to_x: child_x,
+            to_y: (depth + 1) as f32,
+        });
+    }
+
+    x
+}
+
+fn child_paths(path: &str, node: &bonsai_types::NodeView) -> Vec<String> {
+    if node.kind == "binary" {
+        vec![append_bit_to_path(path, false), append_bit_to_path(path, true)]
+    } else if let Some(edge_hex) = node.path_hex.clone() {
+        vec![concat_paths(path, &edge_hex)]
+    } else {
+        Vec::new()
+    }
+}
+
+fn graph_bounds(data: &GraphData) -> (f32, f32) {
+    let (x_gap, y_gap, padding) = graph_metrics();
+    let mut max_x = 0.0;
+    let mut max_y = 0.0;
+    for node in &data.nodes {
+        if node.x > max_x {
+            max_x = node.x;
+        }
+        if node.y > max_y {
+            max_y = node.y;
+        }
+    }
+    let width = (max_x + 1.0) * x_gap + padding;
+    let height = (max_y + 1.0) * y_gap + padding;
+    (width, height)
+}
+
+fn graph_metrics() -> (f32, f32, f32) {
+    (140.0, 120.0, 80.0)
+}
+
+fn short_kind(kind: &str) -> String {
+    match kind {
+        "binary" => "B".to_string(),
+        "edge" => "E".to_string(),
+        other => other.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
+    }
+}
+
+#[component]
+fn PathView(leaf: ReadSignal<Option<LeafResponse>>) -> impl IntoView {
+    view! {
+        <section>
+            <h2>"Path Trace"</h2>
+            <Show when=move || leaf.get().is_some() fallback=|| view! { <p class="muted">"Query a leaf to see value."</p> }>
+                {move || {
+                    let resp = leaf.get().unwrap();
+                    view! { <p>"Value: " {resp.value.unwrap_or_else(|| "None".to_string())}</p> }
+                }}
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn DiffView(
+    block: ReadSignal<String>,
+    diff: ReadSignal<Option<DiffResponse>>,
+    on_block: WriteSignal<String>,
+    on_fetch: impl Fn() + 'static + Copy,
+) -> impl IntoView {
+    view! {
+        <section>
+            <div class="header-row">
+                <h2>"Diff"</h2>
+                <div class="row">
+                    <input type="text" value=block on:input=move |ev| on_block.set(event_target_value(&ev)) />
+                    <button on:click=move |_| on_fetch()>"Load"</button>
+                </div>
+            </div>
+            <Show when=move || diff.get().is_some() fallback=|| view! { <p class="muted">"No diff loaded."</p> }>
+                {move || {
+                    let resp = diff.get().unwrap();
+                    view! {
+                        <ul class="list">
+                            {resp.entries.into_iter().map(|e| view!{
+                                <li>
+                                    <strong>{e.key_type}</strong> " " {e.change_type} " value " {e.value}
+                                </li>
+                            }).collect_view()}
+                        </ul>
+                    }
+                }}
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn ProofView(proof: ReadSignal<Option<ProofResponse>>) -> impl IntoView {
+    view! {
+        <section>
+            <h2>"Proof"</h2>
+            <Show when=move || proof.get().is_some() fallback=|| view! { <div><p class="muted">"No proof loaded."</p></div> }>
+                {move || {
+                    let resp = proof.get().unwrap();
+                    view! {
+                        <div>
+                            <p class="muted">{if resp.verified { "Verified" } else { "Not verified" }}</p>
+                            <ul class="list">
+                                {resp.nodes.into_iter().map(|n| view!{
+                                    <li>{n.kind} " " {n.path_len.unwrap_or_default()}</li>
+                                }).collect_view()}
+                            </ul>
+                        </div>
+                    }
+                }}
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn StatsView(cfs: ReadSignal<Option<CfsResponse>>, on_fetch: impl Fn() + 'static + Copy) -> impl IntoView {
+    view! {
+        <section>
+            <div class="header-row">
+                <h2>"Stats"</h2>
+                <button on:click=move |_| on_fetch()>"Load CFs"</button>
+            </div>
+            <Show when=move || cfs.get().is_some() fallback=|| view! { <div><p class="muted">"No CFs loaded."</p></div> }>
+                {move || {
+                    let resp = cfs.get().unwrap();
+                    view! {
+                        <div>
+                            <ul class="list">
+                                {resp.names.into_iter().map(|name| view!{ <li>{name}</li> }).collect_view()}
+                            </ul>
+                        </div>
+                    }
+                }}
+            </Show>
+        </section>
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Tree,
+    Path,
+    Diff,
+    Proof,
+    Stats,
+}
+
+fn tab_class(active: ReadSignal<Tab>, tab: Tab) -> String {
+    if active.get() == tab {
+        "nav-btn active".to_string()
+    } else {
+        "nav-btn".to_string()
+    }
+}
+
+fn format_trie(kind: TrieKind) -> &'static str {
+    match kind {
+        TrieKind::Contract => "contract",
+        TrieKind::Storage => "storage",
+        TrieKind::Class => "class",
+    }
+}
+
+fn decode_path_bits(encoded: &[u8]) -> Vec<bool> {
+    if encoded.is_empty() {
+        return Vec::new();
+    }
+    let len = encoded[0] as usize;
+    let mut bits = Vec::with_capacity(len);
+    let mut remaining = len;
+    for byte in encoded.iter().skip(1) {
+        for i in 0..8 {
+            if remaining == 0 {
+                break;
+            }
+            let bit = (byte >> (7 - i)) & 1 == 1;
+            bits.push(bit);
+            remaining -= 1;
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    bits
+}
+
+fn encode_path_bits(bits: &[bool]) -> Vec<u8> {
+    let len = bits.len();
+    let mut out = Vec::with_capacity(1 + (len + 7) / 8);
+    out.push(len as u8);
+    let mut current = 0u8;
+    for (i, bit) in bits.iter().enumerate() {
+        let idx = i % 8;
+        if *bit {
+            current |= 1 << (7 - idx);
+        }
+        if idx == 7 {
+            out.push(current);
+            current = 0;
+        }
+    }
+    if len % 8 != 0 {
+        out.push(current);
+    }
+    out
+}
+
+fn append_bit_to_path(path_hex: &str, bit: bool) -> String {
+    let bytes = hex_to_bytes(path_hex).unwrap_or_else(|| vec![0u8]);
+    let mut bits = decode_path_bits(&bytes);
+    bits.push(bit);
+    bytes_to_hex(&encode_path_bits(&bits))
+}
+
+fn concat_paths(left_hex: &str, right_hex: &str) -> String {
+    let left = hex_to_bytes(left_hex).unwrap_or_else(|| vec![0u8]);
+    let right = hex_to_bytes(right_hex).unwrap_or_else(|| vec![0u8]);
+    let mut bits = decode_path_bits(&left);
+    bits.extend(decode_path_bits(&right));
+    bytes_to_hex(&encode_path_bits(&bits))
+}
+
+fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
+    let s = hex.trim().strip_prefix("0x").unwrap_or(hex.trim());
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for i in (0..s.len()).step_by(2) {
+        let byte = u8::from_str_radix(&s[i..i + 2], 16).ok()?;
+        out.push(byte);
+    }
+    Some(out)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2 + 2);
+    s.push_str("0x");
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+#[wasm_bindgen(start)]
+pub fn main() {
+    leptos::mount::mount_to_body(App);
+}

@@ -1,0 +1,18 @@
+[package]
+name = "bonsai-db-reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bitvec.workspace = true
+parity-scale-codec.workspace = true
+rocksdb.workspace = true
+starknet-crypto.workspace = true
+starknet-types-core.workspace = true
+thiserror.workspace = true
+bonsai-types = { path = "../types" }
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
