@@ -171,6 +171,13 @@ body {
   stroke: #2f374a;
   stroke-width: 2;
 }
+.graph-edge-label {
+  fill: #94a3b8;
+  font-size: 11px;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
 .graph-node {
   cursor: pointer;
 }
@@ -182,6 +189,11 @@ body {
 .graph-dot.selected {
   stroke: #f2c94c;
   stroke-width: 3;
+}
+.graph-dot.loading {
+  stroke: #9b59ff;
+  stroke-dasharray: 4 3;
+  animation: pulse 1.2s ease-in-out infinite;
 }
 .graph-dot.edge {
   stroke: #f2c94c;
@@ -226,6 +238,10 @@ body {
 .detail-grid .mono {
   font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 12px;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 @media (max-width: 960px) {
   .graph-stage {

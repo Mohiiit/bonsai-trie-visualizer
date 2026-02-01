@@ -20,6 +20,7 @@ pub fn App() -> impl IntoView {
 
     let (root, set_root) = signal::<Option<RootResponse>>(None);
     let (nodes, set_nodes) = signal(std::collections::HashMap::<String, NodeResponse>::new());
+    let (loading_paths, set_loading_paths) = signal(std::collections::HashSet::<String>::new());
 
     let (diff_block, set_diff_block) = signal(String::new());
     let (diff_resp, set_diff_resp) = signal::<Option<DiffResponse>>(None);
@@ -46,6 +47,9 @@ pub fn App() -> impl IntoView {
     let on_node = Callback::new(move |path_hex: String| {
         let trie = trie_kind.get();
         let ident = identifier.get();
+        set_loading_paths.update(|set| {
+            set.insert(path_hex.clone());
+        });
         spawn_local(async move {
             let mut url = format!("{API_BASE}/api/trie/node?trie={}&path={}", format_trie(trie), urlencoding::encode(&path_hex));
             if trie == TrieKind::Storage && !ident.is_empty() {
@@ -53,8 +57,12 @@ pub fn App() -> impl IntoView {
             }
             let Ok(resp) = Request::get(&url).send().await else { return; };
             let Ok(data) = resp.json::<NodeResponse>().await else { return; };
+            let path_key = path_hex.clone();
             set_nodes.update(|map| {
-                map.insert(path_hex, data);
+                map.insert(path_key, data);
+            });
+            set_loading_paths.update(|set| {
+                set.remove(&path_hex);
             });
         });
     });
@@ -72,7 +80,7 @@ pub fn App() -> impl IntoView {
                 let Ok(resp) = Request::get(&url).send().await else { return; };
                 let Ok(data) = resp.json::<RootResponse>().await else { return; };
                 if let Some(node) = data.node.clone() {
-                    for child in child_paths(&data.path_hex, &node) {
+                    for (child, _) in child_paths(&data.path_hex, &node) {
                         on_node.run(child);
                     }
                 }
@@ -182,7 +190,7 @@ pub fn App() -> impl IntoView {
 
             <main class="content">
                 <Show when=move || active_tab.get() == Tab::Tree fallback=|| ()>
-                    <TreeView root=root nodes=nodes on_root=fetch_root on_node=on_node />
+                    <TreeView root=root nodes=nodes loading=loading_paths on_root=fetch_root on_node=on_node />
                 </Show>
                 <Show when=move || active_tab.get() == Tab::Path fallback=|| ()>
                     <PathView leaf=leaf_resp />
@@ -205,6 +213,7 @@ pub fn App() -> impl IntoView {
 fn TreeView(
     root: ReadSignal<Option<RootResponse>>,
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
+    loading: ReadSignal<std::collections::HashSet<String>>,
     on_root: impl Fn() + 'static + Copy,
     on_node: Callback<String>,
 ) -> impl IntoView {
@@ -217,7 +226,7 @@ fn TreeView(
             <Show when=move || root.get().is_some() fallback=|| view! { <p class="muted">"No root loaded."</p> }>
                 {move || {
                     let root = root.get().unwrap();
-                    view! { <GraphView root=root nodes=nodes on_node=on_node /> }
+                    view! { <GraphView root=root nodes=nodes loading=loading on_node=on_node /> }
                 }}
             </Show>
         </section>
@@ -228,6 +237,7 @@ fn TreeView(
 fn GraphView(
     root: RootResponse,
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
+    loading: ReadSignal<std::collections::HashSet<String>>,
     on_node: Callback<String>,
 ) -> impl IntoView {
     let root_path = root.path_hex.clone();
@@ -235,6 +245,11 @@ fn GraphView(
     let root_for_action = StoredValue::new(root_path.clone());
     let root_for_graph = root.clone();
     let (selected, set_selected) = signal::<Option<String>>(None);
+    let (hovered, set_hovered) = signal::<Option<String>>(None);
+    let (scale, set_scale) = signal(1.0_f32);
+    let (offset, set_offset) = signal((0.0_f32, 0.0_f32));
+    let (dragging, set_dragging) = signal(false);
+    let (last_pos, set_last_pos) = signal((0.0_f32, 0.0_f32));
     let graph = Memo::new(move |_| {
         let nodes_map = nodes.get();
         let node_count = nodes_map.len();
@@ -259,53 +274,101 @@ fn GraphView(
                         </div>
                         <div class="graph-stage">
                             <div class="graph-detail">
-                                {render_selection(selected, nodes, root_path.clone(), root_node.clone())}
+                                {render_selection(selected, hovered, nodes, root_path.clone(), root_node.clone(), loading)}
                             </div>
                         <svg
                             class="graph-svg"
                             viewBox=format!("0 0 {} {}", width, height)
                             width="100%"
                             height="100%"
+                            on:wheel=move |ev| {
+                                ev.prevent_default();
+                                let delta = ev.delta_y() as f32;
+                                let next = (scale.get() - delta * 0.001).clamp(0.3, 2.5);
+                                set_scale.set(next);
+                            }
+                            on:pointerdown=move |ev| {
+                                set_dragging.set(true);
+                                set_last_pos.set((ev.client_x() as f32, ev.client_y() as f32));
+                            }
+                            on:pointerup=move |_| set_dragging.set(false)
+                            on:pointerleave=move |_| set_dragging.set(false)
+                            on:pointermove=move |ev| {
+                                if dragging.get() {
+                                    let (lx, ly) = last_pos.get();
+                                    let (ox, oy) = offset.get();
+                                    let nx = ev.client_x() as f32;
+                                    let ny = ev.client_y() as f32;
+                                    set_offset.set((ox + (nx - lx), oy + (ny - ly)));
+                                    set_last_pos.set((nx, ny));
+                                }
+                            }
                         >
+                            <g transform=move || {
+                                let (ox, oy) = offset.get();
+                                format!("translate({} {}) scale({})", ox, oy, scale.get())
+                            }>
                             {data.edges.into_iter().map(|edge| {
                                 let x1 = edge.from_x * x_gap + pad;
                                 let y1 = edge.from_y * y_gap + pad;
                                 let x2 = edge.to_x * x_gap + pad;
                                 let y2 = edge.to_y * y_gap + pad;
+                                let label_x = (x1 + x2) * 0.5;
+                                let label_y = (y1 + y2) * 0.5;
                                 view! {
-                                    <line
-                                        class="graph-edge"
-                                        x1=x1
-                                        y1=y1
-                                        x2=x2
-                                        y2=y2
-                                    />
+                                    <>
+                                        <line
+                                            class="graph-edge"
+                                            x1=x1
+                                            y1=y1
+                                            x2=x2
+                                            y2=y2
+                                        />
+                                        <text class="graph-edge-label" x=label_x y=label_y>{edge.label}</text>
+                                    </>
                                 }
                             }).collect_view()}
                             {data.nodes.into_iter().map(|node| {
                                 let on_node = on_node.clone();
                                 let set_selected = set_selected;
+                                let set_hovered = set_hovered;
                                 let node_path = node.path.clone();
+                                let node_path_click = node_path.clone();
+                                let node_path_hover_in = node_path.clone();
                                 let node_data = node.node.clone();
                                 let kind = node.kind.clone();
                                 let x = node.x * x_gap + pad;
                                 let y = node.y * y_gap + pad;
                                 let is_selected = selected.get().as_ref().map(|p| p == &node_path).unwrap_or(false);
+                                let is_loading = loading.get().contains(&node_path);
                                 view! {
                                     <g class="graph-node" on:click=move |_| {
-                                        set_selected.set(Some(node_path.clone()));
-                                        on_node.run(node_path.clone());
+                                        set_selected.set(Some(node_path_click.clone()));
+                                        on_node.run(node_path_click.clone());
                                         if let Some(node_data) = node_data.clone() {
-                                            for child in child_paths(&node_path, &node_data) {
+                                            for (child, _) in child_paths(&node_path_click, &node_data) {
                                                 on_node.run(child);
                                             }
                                         }
                                     }>
-                                        <circle class=format!("graph-dot {} {}", kind, if is_selected { "selected" } else { "" }) cx=x cy=y r="18" />
+                                        <circle
+                                            class=format!(
+                                                "graph-dot {} {} {}",
+                                                kind,
+                                                if is_selected { "selected" } else { "" },
+                                                if is_loading { "loading" } else { "" }
+                                            )
+                                            cx=x
+                                            cy=y
+                                            r="18"
+                                            on:mouseenter=move |_| set_hovered.set(Some(node_path_hover_in.clone()))
+                                            on:mouseleave=move |_| set_hovered.set(None)
+                                        />
                                         <text class="graph-label" x=x y=y>{short_kind(&kind)}</text>
                                     </g>
                                 }
                             }).collect_view()}
+                            </g>
                         </svg>
                         </div>
                     </>
@@ -330,6 +393,7 @@ struct GraphEdge {
     from_y: f32,
     to_x: f32,
     to_y: f32,
+    label: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -358,12 +422,12 @@ fn walk_graph(
     next_x: &mut f32,
     data: &mut GraphData,
 ) -> f32 {
-    let mut child_centers = Vec::new();
+    let mut child_centers: Vec<(f32, String)> = Vec::new();
     if let Some(node_data) = node.clone() {
-        for child_path in child_paths(path, &node_data) {
+        for (child_path, label) in child_paths(path, &node_data) {
             if let Some(child_node) = nodes.get(&child_path).and_then(|n| n.node.clone()) {
                 let child_x = walk_graph(&child_path, Some(child_node), nodes, depth + 1, next_x, data);
-                child_centers.push(child_x);
+                child_centers.push((child_x, label));
             }
         }
     }
@@ -373,8 +437,8 @@ fn walk_graph(
         *next_x += 1.0;
         x
     } else {
-        let first = child_centers.first().copied().unwrap_or(0.0);
-        let last = child_centers.last().copied().unwrap_or(first);
+        let first = child_centers.first().map(|(x, _)| *x).unwrap_or(0.0);
+        let last = child_centers.last().map(|(x, _)| *x).unwrap_or(first);
         (first + last) * 0.5
     };
 
@@ -387,23 +451,27 @@ fn walk_graph(
         y,
     });
 
-    for child_x in child_centers {
+    for (child_x, label) in child_centers {
         data.edges.push(GraphEdge {
             from_x: x,
             from_y: y,
             to_x: child_x,
             to_y: (depth + 1) as f32,
+            label,
         });
     }
 
     x
 }
 
-fn child_paths(path: &str, node: &bonsai_types::NodeView) -> Vec<String> {
+fn child_paths(path: &str, node: &bonsai_types::NodeView) -> Vec<(String, String)> {
     if node.kind == "binary" {
-        vec![append_bit_to_path(path, false), append_bit_to_path(path, true)]
+        vec![
+            (append_bit_to_path(path, false), "L".to_string()),
+            (append_bit_to_path(path, true), "R".to_string()),
+        ]
     } else if let Some(edge_hex) = node.path_hex.clone() {
-        vec![concat_paths(path, &edge_hex)]
+        vec![(concat_paths(path, &edge_hex), "C".to_string())]
     } else {
         Vec::new()
     }
@@ -440,9 +508,11 @@ fn short_kind(kind: &str) -> String {
 
 fn render_selection(
     selected: ReadSignal<Option<String>>,
+    hovered: ReadSignal<Option<String>>,
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
     root_path: String,
     root_node: Option<bonsai_types::NodeView>,
+    loading: ReadSignal<std::collections::HashSet<String>>,
 ) -> impl IntoView {
     let root_path = StoredValue::new(root_path);
     let root_node = StoredValue::new(root_node);
@@ -450,11 +520,20 @@ fn render_selection(
         <div class="detail-card">
             <h3>"Node Details"</h3>
             <Show
-                when=move || selected.get().is_some()
-                fallback=|| view! { <p class="muted">"Select a node to see details."</p> }
+                when=move || !loading.get().is_empty()
+                fallback=|| ()
             >
                 {move || {
-                    let path = selected.get().unwrap_or_default();
+                    let count = loading.get().len();
+                    view! { <p class="muted">"Loading nodes: " {count}</p> }
+                }}
+            </Show>
+            <Show
+                when=move || selected.get().is_some() || hovered.get().is_some()
+                fallback=|| view! { <p class="muted">"Select or hover a node to see details."</p> }
+            >
+                {move || {
+                    let path = selected.get().or_else(|| hovered.get()).unwrap_or_default();
                     let node = if path == root_path.get_value() {
                         root_node.get_value()
                     } else {
