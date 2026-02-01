@@ -27,6 +27,7 @@ pub fn App() -> impl IntoView {
 
     let (proof_resp, set_proof_resp) = signal::<Option<ProofResponse>>(None);
     let (leaf_resp, set_leaf_resp) = signal::<Option<LeafResponse>>(None);
+    let (trace_bits, set_trace_bits) = signal::<Option<String>>(None);
 
     let (cfs_resp, set_cfs_resp) = signal::<Option<CfsResponse>>(None);
 
@@ -139,6 +140,21 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let fetch_trace = {
+        let fetch_leaf = fetch_leaf;
+        let fetch_proof = fetch_proof;
+        move || {
+            let key = key_input.get();
+            if key.is_empty() {
+                return;
+            }
+            let bits = felt_hex_to_bits(&key);
+            set_trace_bits.set(Some(format_bits_preview(&bits)));
+            fetch_leaf();
+            fetch_proof();
+        }
+    };
+
     let fetch_cfs = move || {
         spawn_local(async move {
             let Ok(resp) = Request::get(&format!("{API_BASE}/api/cfs")).send().await else { return; };
@@ -184,6 +200,7 @@ pub fn App() -> impl IntoView {
                     <div class="row">
                         <button on:click=move |_| fetch_leaf()>"Leaf"</button>
                         <button on:click=move |_| fetch_proof()>"Proof"</button>
+                        <button on:click=move |_| fetch_trace()>"Trace"</button>
                     </div>
                 </div>
             </aside>
@@ -193,7 +210,7 @@ pub fn App() -> impl IntoView {
                     <TreeView root=root nodes=nodes loading=loading_paths on_root=fetch_root on_node=on_node />
                 </Show>
                 <Show when=move || active_tab.get() == Tab::Path fallback=|| ()>
-                    <PathView leaf=leaf_resp />
+                    <PathView leaf=leaf_resp proof=proof_resp trace=trace_bits />
                 </Show>
                 <Show when=move || active_tab.get() == Tab::Diff fallback=|| ()>
                     <DiffView block=diff_block diff=diff_resp on_block=set_diff_block on_fetch=fetch_diff />
@@ -569,14 +586,48 @@ fn render_selection(
 }
 
 #[component]
-fn PathView(leaf: ReadSignal<Option<LeafResponse>>) -> impl IntoView {
+fn PathView(
+    leaf: ReadSignal<Option<LeafResponse>>,
+    proof: ReadSignal<Option<ProofResponse>>,
+    trace: ReadSignal<Option<String>>,
+) -> impl IntoView {
     view! {
         <section>
             <h2>"Path Trace"</h2>
-            <Show when=move || leaf.get().is_some() fallback=|| view! { <p class="muted">"Query a leaf to see value."</p> }>
+            <Show
+                when=move || trace.get().is_some()
+                fallback=|| view! { <p class="muted">"Click Trace to compute a key path."</p> }
+            >
+                {move || {
+                    let bits = trace.get().unwrap_or_default();
+                    view! {
+                        <div class="detail-card">
+                            <h3>"Path Bits"</h3>
+                            <p class="mono">{bits}</p>
+                        </div>
+                    }
+                }}
+            </Show>
+            <Show when=move || leaf.get().is_some() fallback=|| ()>
                 {move || {
                     let resp = leaf.get().unwrap();
                     view! { <p>"Value: " {resp.value.unwrap_or_else(|| "None".to_string())}</p> }
+                }}
+            </Show>
+            <Show when=move || proof.get().is_some() fallback=|| ()>
+                {move || {
+                    let resp = proof.get().unwrap();
+                    view! {
+                        <div class="detail-card">
+                            <h3>"Proof Trace"</h3>
+                            <p class="muted">{if resp.verified { "Verified" } else { "Not verified" }}</p>
+                            <ul class="list">
+                                {resp.nodes.into_iter().map(|n| view!{
+                                    <li>{n.kind} " path_len=" {n.path_len.unwrap_or_default()}</li>
+                                }).collect_view()}
+                            </ul>
+                        </div>
+                    }
                 }}
             </Show>
         </section>
@@ -687,6 +738,40 @@ fn format_trie(kind: TrieKind) -> &'static str {
         TrieKind::Contract => "contract",
         TrieKind::Storage => "storage",
         TrieKind::Class => "class",
+    }
+}
+
+fn felt_hex_to_bits(hex: &str) -> Vec<bool> {
+    let mut bytes = hex_to_bytes(hex).unwrap_or_default();
+    if bytes.len() < 32 {
+        let mut padded = vec![0u8; 32 - bytes.len()];
+        padded.append(&mut bytes);
+        bytes = padded;
+    } else if bytes.len() > 32 {
+        bytes = bytes[bytes.len() - 32..].to_vec();
+    }
+    let mut bits = Vec::with_capacity(256);
+    for b in bytes {
+        for i in 0..8 {
+            bits.push((b >> (7 - i)) & 1 == 1);
+        }
+    }
+    if bits.len() > 5 {
+        bits.split_off(5)
+    } else {
+        Vec::new()
+    }
+}
+
+fn format_bits_preview(bits: &[bool]) -> String {
+    let len = bits.len();
+    let to_str = |slice: &[bool]| slice.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>();
+    if len <= 128 {
+        format!("{} (len={})", to_str(bits), len)
+    } else {
+        let start = to_str(&bits[..64]);
+        let end = to_str(&bits[len - 64..]);
+        format!("{}...{} (len={})", start, end, len)
     }
 }
 
