@@ -125,6 +125,24 @@ body {
   padding: 8px 0;
   border-bottom: 1px solid #2a3142;
 }
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.diff-table th,
+.diff-table td {
+  text-align: left;
+  padding: 8px 6px;
+  border-bottom: 1px solid #2a3142;
+}
+.diff-table th {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+}
 .graph {
   border: 1px solid #2f374a;
   background: radial-gradient(circle at top, rgba(34, 40, 58, 0.6), rgba(17, 20, 30, 0.95));

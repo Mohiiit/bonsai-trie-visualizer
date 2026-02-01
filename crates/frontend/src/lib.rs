@@ -646,7 +646,7 @@ fn DiffView(
             <div class="header-row">
                 <h2>"Diff"</h2>
                 <div class="row">
-                    <input type="text" value=block on:input=move |ev| on_block.set(event_target_value(&ev)) />
+                    <input type="text" placeholder="Block number" value=block on:input=move |ev| on_block.set(event_target_value(&ev)) />
                     <button on:click=move |_| on_fetch()>"Load"</button>
                 </div>
             </div>
@@ -654,13 +654,30 @@ fn DiffView(
                 {move || {
                     let resp = diff.get().unwrap();
                     view! {
-                        <ul class="list">
-                            {resp.entries.into_iter().map(|e| view!{
-                                <li>
-                                    <strong>{e.key_type}</strong> " " {e.change_type} " value " {e.value}
-                                </li>
-                            }).collect_view()}
-                        </ul>
+                        <div class="detail-card">
+                            <h3>"Changes"</h3>
+                            <p class="muted">"Total entries: " {resp.entries.len()}</p>
+                            <table class="diff-table">
+                                <thead>
+                                    <tr>
+                                        <th>"Key Type"</th>
+                                        <th>"Change"</th>
+                                        <th>"Key Len"</th>
+                                        <th>"Value"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {resp.entries.into_iter().map(|e| view!{
+                                        <tr>
+                                            <td>{e.key_type}</td>
+                                            <td>{e.change_type}</td>
+                                            <td>{e.key_len.unwrap_or_default()}</td>
+                                            <td class="mono">{e.value}</td>
+                                        </tr>
+                                    }).collect_view()}
+                                </tbody>
+                            </table>
+                        </div>
                     }
                 }}
             </Show>
