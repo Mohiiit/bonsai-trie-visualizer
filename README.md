@@ -42,3 +42,6 @@ Search:
 
 Final overview:
 ![Final](assets/screenshots/phase-7-final.png)
+
+Progressive render:
+![Progressive](assets/screenshots/phase-8-progressive.png)

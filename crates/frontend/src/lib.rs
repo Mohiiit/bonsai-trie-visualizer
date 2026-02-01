@@ -1,5 +1,6 @@
 use bonsai_types::{CfsResponse, DiffResponse, LeafResponse, NodeResponse, ProofResponse, RootResponse, TrieKind};
 use gloo_net::http::Request;
+use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use leptos::prelude::IntoAny;
 use leptos::task::spawn_local;
@@ -21,6 +22,9 @@ pub fn App() -> impl IntoView {
     let (root, set_root) = signal::<Option<RootResponse>>(None);
     let (nodes, set_nodes) = signal(std::collections::HashMap::<String, NodeResponse>::new());
     let (loading_paths, set_loading_paths) = signal(std::collections::HashSet::<String>::new());
+    let (expand_running, set_expand_running) = signal(false);
+    let (expand_limit, set_expand_limit) = signal(2000usize);
+    let (expand_progress, set_expand_progress) = signal((0usize, 0usize));
     let (search_input, set_search_input) = signal(String::new());
     let (search_target, set_search_target) = signal::<Option<String>>(None);
 
@@ -47,31 +51,44 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let on_node = Callback::new(move |path_hex: String| {
-        let trie = trie_kind.get();
-        let ident = identifier.get();
-        set_loading_paths.update(|set| {
-            set.insert(path_hex.clone());
-        });
-        spawn_local(async move {
+    let fetch_node = {
+        let set_nodes = set_nodes;
+        let set_loading_paths = set_loading_paths;
+        move |trie: TrieKind, ident: String, path_hex: String| async move {
+            set_loading_paths.update(|set| {
+                set.insert(path_hex.clone());
+            });
             let mut url = format!("{API_BASE}/api/trie/node?trie={}&path={}", format_trie(trie), urlencoding::encode(&path_hex));
             if trie == TrieKind::Storage && !ident.is_empty() {
                 url.push_str(&format!("&identifier={}", urlencoding::encode(&ident)));
             }
-            let Ok(resp) = Request::get(&url).send().await else { return; };
-            let Ok(data) = resp.json::<NodeResponse>().await else { return; };
+            let Ok(resp) = Request::get(&url).send().await else { return None; };
+            let Ok(data) = resp.json::<NodeResponse>().await else { return None; };
             let path_key = path_hex.clone();
             set_nodes.update(|map| {
-                map.insert(path_key, data);
+                map.insert(path_key, data.clone());
             });
             set_loading_paths.update(|set| {
                 set.remove(&path_hex);
             });
-        });
-    });
+            Some(data)
+        }
+    };
+
+    let on_node = {
+        let fetch_node = fetch_node.clone();
+        Callback::new(move |path_hex: String| {
+            let trie = trie_kind.get();
+            let ident = identifier.get();
+            spawn_local(async move {
+                let _ = fetch_node(trie, ident, path_hex).await;
+            });
+        })
+    };
 
     let fetch_root = {
         let on_node = on_node.clone();
+        let fetch_node = fetch_node.clone();
         move || {
             let trie = trie_kind.get();
             let ident = identifier.get();
@@ -86,8 +103,60 @@ pub fn App() -> impl IntoView {
                     for (child, _) in child_paths(&data.path_hex, &node) {
                         on_node.run(child);
                     }
+                } else {
+                    let _ = fetch_node(trie, ident, data.path_hex.clone()).await;
                 }
                 set_root.set(Some(data));
+            });
+        }
+    };
+
+    let expand_all = {
+        let fetch_node = fetch_node.clone();
+        let set_expand_running = set_expand_running;
+        let set_expand_progress = set_expand_progress;
+        let expand_limit = expand_limit;
+        let root = root;
+        let expand_running = expand_running;
+        move || {
+            let trie = trie_kind.get();
+            let ident = identifier.get();
+            let limit = expand_limit.get();
+            let root = root.get();
+            if root.is_none() || expand_running.get() {
+                return;
+            }
+            set_expand_running.set(true);
+            set_expand_progress.set((0, 0));
+            spawn_local(async move {
+                let mut queue = std::collections::VecDeque::new();
+                let mut seen = std::collections::HashSet::new();
+                let root_path = root.unwrap().path_hex;
+                queue.push_back(root_path.clone());
+                seen.insert(root_path);
+
+                let mut loaded = 0usize;
+                while let Some(path) = queue.pop_front() {
+                    if loaded >= limit {
+                        break;
+                    }
+                    let Some(resp) = fetch_node(trie, ident.clone(), path.clone()).await else {
+                        continue;
+                    };
+                    loaded += 1;
+                    if let Some(node) = resp.node {
+                        for (child, _) in child_paths(&path, &node) {
+                            if seen.insert(child.clone()) {
+                                queue.push_back(child);
+                            }
+                        }
+                    }
+                    set_expand_progress.set((loaded, queue.len()));
+                    if loaded % 25 == 0 {
+                        TimeoutFuture::new(16).await;
+                    }
+                }
+                set_expand_running.set(false);
             });
         }
     };
@@ -238,7 +307,20 @@ pub fn App() -> impl IntoView {
 
             <main class="content">
                 <Show when=move || active_tab.get() == Tab::Tree fallback=|| ()>
-                    <TreeView root=root nodes=nodes loading=loading_paths search=search_target on_root=fetch_root on_node=on_node />
+                    <TreeView
+                        root=root
+                        nodes=nodes
+                        loading=loading_paths
+                        search=search_target
+                        expand_running=expand_running
+                        expand_limit=expand_limit
+                        expand_limit_set=set_expand_limit
+                        expand_progress=expand_progress
+                        on_root=fetch_root
+                        on_node=on_node
+                        on_expand=expand_all
+                        on_stop=move || set_expand_running.set(false)
+                    />
                 </Show>
                 <Show when=move || active_tab.get() == Tab::Path fallback=|| ()>
                     <PathView leaf=leaf_resp proof=proof_resp trace=trace_bits />
@@ -263,8 +345,14 @@ fn TreeView(
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
     loading: ReadSignal<std::collections::HashSet<String>>,
     search: ReadSignal<Option<String>>,
-    on_root: impl Fn() + 'static + Copy,
+    expand_running: ReadSignal<bool>,
+    expand_limit: ReadSignal<usize>,
+    expand_limit_set: WriteSignal<usize>,
+    expand_progress: ReadSignal<(usize, usize)>,
+    on_root: impl Fn() + 'static + Copy + Send + Sync,
     on_node: Callback<String>,
+    on_expand: impl Fn() + 'static + Copy + Send + Sync,
+    on_stop: impl Fn() + 'static + Copy + Send + Sync,
 ) -> impl IntoView {
     view! {
         <section>
@@ -275,7 +363,21 @@ fn TreeView(
             <Show when=move || root.get().is_some() fallback=|| view! { <p class="muted">"No root loaded."</p> }>
                 {move || {
                     let root = root.get().unwrap();
-                    view! { <GraphView root=root nodes=nodes loading=loading search=search on_node=on_node /> }
+                    view! {
+                        <GraphView
+                            root=root
+                            nodes=nodes
+                            loading=loading
+                            search=search
+                            expand_running=expand_running
+                            expand_limit=expand_limit
+                            expand_limit_set=expand_limit_set
+                            expand_progress=expand_progress
+                            on_node=on_node
+                            on_expand=on_expand
+                            on_stop=on_stop
+                        />
+                    }
                 }}
             </Show>
         </section>
@@ -288,7 +390,13 @@ fn GraphView(
     nodes: ReadSignal<std::collections::HashMap<String, NodeResponse>>,
     loading: ReadSignal<std::collections::HashSet<String>>,
     search: ReadSignal<Option<String>>,
+    expand_running: ReadSignal<bool>,
+    expand_limit: ReadSignal<usize>,
+    expand_limit_set: WriteSignal<usize>,
+    expand_progress: ReadSignal<(usize, usize)>,
     on_node: Callback<String>,
+    on_expand: impl Fn() + 'static + Copy + Send + Sync,
+    on_stop: impl Fn() + 'static + Copy + Send + Sync,
 ) -> impl IntoView {
     let root_path = root.path_hex.clone();
     let root_node = root.node.clone();
@@ -324,8 +432,26 @@ fn GraphView(
                         <div class="graph-header">
                             <div class="graph-help">
                                 <p class="muted">"Loaded nodes: " {node_count + 1} ". Click a node to load its children."</p>
+                                <p class="muted">"Progress: " {expand_progress.get().0} " loaded, " {expand_progress.get().1} " queued."</p>
                             </div>
-                            <button class="graph-action" on:click=move |_| on_node.run(root_for_action.get_value())>"Load Root Node"</button>
+                            <div class="graph-actions">
+                                <button class="graph-action" on:click=move |_| on_node.run(root_for_action.get_value())>"Load Root Node"</button>
+                                <button class="graph-action" on:click=move |_| on_expand() disabled=move || expand_running.get()>"Render All"</button>
+                                <button class="graph-action ghost" on:click=move |_| on_stop() disabled=move || !expand_running.get()>"Stop"</button>
+                                <div class="limit-input">
+                                    <label>"Max"</label>
+                                    <input
+                                        type="number"
+                                        min="100"
+                                        value=move || expand_limit.get().to_string()
+                                        on:input=move |ev| {
+                                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
+                                                expand_limit_set.set(v.max(100));
+                                            }
+                                        }
+                                    />
+                                </div>
+                            </div>
                         </div>
                         <div class="graph-stage">
                             <div class="graph-detail">
